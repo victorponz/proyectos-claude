@@ -82,7 +82,7 @@
   #app .td-num a { color: var(--muted); text-decoration: none; }
   #app .td-num a:hover { color: var(--accent); text-decoration: underline; }
   #app .td-date { font-family: 'JetBrains Mono', monospace; white-space: nowrap; color: var(--muted); }
-  #app .td-subject { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+  #app .td-subject { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #app .stat-added { color: var(--added); font-weight: 600; font-family: 'JetBrains Mono', monospace; }
   #app .stat-removed { color: var(--removed); font-weight: 600; font-family: 'JetBrains Mono', monospace; }
 
@@ -101,6 +101,23 @@
   #app .status-line.error { color: var(--removed); }
   #app .spinner { display: inline-block; width: 11px; height: 11px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: middle; margin-right: 5px; }
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  #app .filter-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+  #app .filter-bar label { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  #app input[type="date"] {
+    background: var(--surface-2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 7px; padding: 7px 10px; font-size: 13px; font-family: inherit;
+    outline: none; color-scheme: dark;
+  }
+  #app input[type="date"]:focus { border-color: var(--accent); }
+  #app .filter-badge {
+    font-size: 11px; font-family: 'JetBrains Mono', monospace;
+    background: rgba(216,161,58,0.15); color: var(--accent);
+    border: 1px solid rgba(216,161,58,0.3); border-radius: 5px;
+    padding: 2px 7px; white-space: nowrap;
+  }
+  #app button.ghost { background: transparent; border-color: transparent; color: var(--muted); padding: 7px 8px; font-size: 12px; }
+  #app button.ghost:hover { color: var(--removed); border-color: var(--removed); background: transparent; }
 </style>
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -113,6 +130,8 @@
   let SB_KEY = '';
   let pendingServiceRoleConfirm = false;
   let connected = false;
+  // repoKey -> { repo, commits[] } — datos completos en memoria para filtrar sin red
+  const cache = {};
 
   // ------------------------------------------------------------------
   // Almacenamiento persistente (Claude.ai) o en memoria como fallback
@@ -204,14 +223,10 @@
   // ------------------------------------------------------------------
   // Render
   // ------------------------------------------------------------------
-  function renderResult(key, repo, commits) {
-    const area = document.getElementById('resultsArea');
-    const ghUrl = repoUrl(key);
+  function buildRows(key, commits) {
+    if (!commits.length) return '<tr><td colspan="7" class="empty" style="text-align:center;">Sin commits en el rango seleccionado.</td></tr>';
     const maxChange = Math.max(1, ...commits.map(c => c.added + c.removed));
-    const totalAdded = commits.reduce((s, c) => s + c.added, 0);
-    const totalRemoved = commits.reduce((s, c) => s + c.removed, 0);
-
-    const rows = commits.map(c => {
+    return commits.map(c => {
       const aPct = Math.round(c.added / maxChange * 100);
       const rPct = Math.round(c.removed / maxChange * 100);
       const url = commitUrl(key, c.sha);
@@ -225,10 +240,46 @@
         '<td><div class="diffbar"><span class="a" style="width:' + aPct + '%"></span><span class="r" style="width:' + rPct + '%"></span></div></td>' +
       '</tr>';
     }).join('');
+  }
 
-    const id = 'result-' + key.replace(/[^a-z0-9]/gi, '_');
-    const old = document.getElementById(id);
+  function applyFilter(key) {
+    const { commits } = cache[key];
+    const fromVal = document.getElementById('filter-from-' + cssId(key)).value;
+    const toVal   = document.getElementById('filter-to-'   + cssId(key)).value;
+    const from = fromVal ? new Date(fromVal + 'T00:00:00') : null;
+    const to   = toVal   ? new Date(toVal   + 'T23:59:59') : null;
+
+    const filtered = commits.filter(c => {
+      const d = new Date(c.date);
+      if (from && d < from) return false;
+      if (to   && d > to)   return false;
+      return true;
+    });
+
+    const totalAdded   = filtered.reduce((s, c) => s + c.added,   0);
+    const totalRemoved = filtered.reduce((s, c) => s + c.removed, 0);
+    const isFiltered   = from || to;
+
+    document.getElementById('tbody-' + cssId(key)).innerHTML = buildRows(key, filtered);
+    document.getElementById('totals-' + cssId(key)).innerHTML =
+      '<div class="ti"><span class="a">+' + totalAdded   + '</span> líneas añadidas</div>' +
+      '<div class="ti"><span class="r">-' + totalRemoved + '</span> líneas eliminadas</div>' +
+      '<div class="ti">' + filtered.length + (isFiltered ? ' de ' + commits.length : '') + ' commits</div>' +
+      (isFiltered ? '<span class="filter-badge">filtrado por fecha</span>' : '');
+  }
+
+  function cssId(key) { return key.replace(/[^a-z0-9]/gi, '_'); }
+
+  function renderResult(key, repo, commits) {
+    const area   = document.getElementById('resultsArea');
+    const ghUrl  = repoUrl(key);
+    const id     = 'result-' + cssId(key);
+    const old    = document.getElementById(id);
     if (old) old.remove();
+
+    const totalAdded   = commits.reduce((s, c) => s + c.added,   0);
+    const totalRemoved = commits.reduce((s, c) => s + c.removed, 0);
+    const cid = cssId(key);
 
     const div = document.createElement('div');
     div.className = 'panel';
@@ -244,14 +295,32 @@
       '</div>' +
       (commits.length === 0
         ? '<div class="empty">No hay commits registrados todavía para este repositorio.</div>'
-        : '<table><thead><tr><th>#</th><th>Commit</th><th>Fecha</th><th>Mensaje</th><th>Añadidas</th><th>Eliminadas</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>' +
-          '<div class="totals-row">' +
-            '<div class="ti"><span class="a">+' + totalAdded + '</span> líneas añadidas</div>' +
-            '<div class="ti"><span class="r">-' + totalRemoved + '</span> líneas eliminadas</div>' +
-            '<div class="ti">' + commits.length + ' commits</div>' +
-          '</div>'
+        :
+        '<div class="filter-bar">' +
+          '<label>Desde</label>' +
+          '<input type="date" id="filter-from-' + cid + '">' +
+          '<label>Hasta</label>' +
+          '<input type="date" id="filter-to-' + cid + '">' +
+          '<button class="ghost" id="filter-clear-' + cid + '">✕ Limpiar</button>' +
+        '</div>' +
+        '<table><thead><tr><th>#</th><th>Commit</th><th>Fecha</th><th>Mensaje</th><th>Añadidas</th><th>Eliminadas</th><th></th></tr></thead>' +
+        '<tbody id="tbody-' + cid + '">' + buildRows(key, commits) + '</tbody></table>' +
+        '<div class="totals-row" id="totals-' + cid + '">' +
+          '<div class="ti"><span class="a">+' + totalAdded   + '</span> líneas añadidas</div>' +
+          '<div class="ti"><span class="r">-' + totalRemoved + '</span> líneas eliminadas</div>' +
+          '<div class="ti">' + commits.length + ' commits</div>' +
+        '</div>'
       );
     area.prepend(div);
+
+    if (commits.length > 0) {
+      const fromEl  = document.getElementById('filter-from-' + cid);
+      const toEl    = document.getElementById('filter-to-'   + cid);
+      const clearEl = document.getElementById('filter-clear-' + cid);
+      fromEl.addEventListener('change',  () => applyFilter(key));
+      toEl.addEventListener('change',    () => applyFilter(key));
+      clearEl.addEventListener('click',  () => { fromEl.value = ''; toEl.value = ''; applyFilter(key); });
+    }
   }
 
   // ------------------------------------------------------------------
@@ -297,6 +366,7 @@
         setStatus('"' + key + '" no existe en Supabase. ¿Has ejecutado "add" y "check" con el script Python?', true);
         return;
       }
+      cache[key] = { repo, commits };
       renderResult(key, repo, commits);
       setStatus(commits.length + ' commit(s) cargado(s) para ' + key + '.');
     } catch (e) {
